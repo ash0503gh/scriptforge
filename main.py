@@ -84,6 +84,25 @@ def make_client() -> genai.Client:
         raise ValueError("GEMINI_API_KEY is not configured in environment variables.")
     return genai.Client(api_key=GEMINI_API_KEY)
 
+DEFAULT_SAFETY_SETTINGS = [
+    types.SafetySetting(
+        category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    ),
+    types.SafetySetting(
+        category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+        threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    ),
+    types.SafetySetting(
+        category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+        threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    ),
+    types.SafetySetting(
+        category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    ),
+]
+
 def robust_json_loads(raw: str) -> dict:
     if not raw:
         raise ValueError("Empty response from model.")
@@ -267,23 +286,38 @@ Return ONLY this exact JSON (no markdown fences):
         try:
             model_to_use = req.model or MODEL
 
-            def call_gemini_analyse():
-                print(f"[analyse] calling Gemini {model_to_use}...", file=sys.stderr)
+            def call_gemini_analyse(active_model: str):
+                print(f"[analyse] calling Gemini {active_model}...", file=sys.stderr)
                 client = make_client()
-                result = client.models.generate_content(
-                    model=model_to_use,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system,
-                        response_mime_type="application/json",
-                        temperature=0.7,
-                    ),
-                )
-                print(f"[analyse] Gemini done", file=sys.stderr)
-                return result
+                is_gemini_3 = "3." in active_model
+                cfg = {
+                    "system_instruction": system,
+                    "response_mime_type": "application/json",
+                    "safety_settings": DEFAULT_SAFETY_SETTINGS,
+                }
+                if is_gemini_3:
+                    cfg["thinking_config"] = types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW)
+                else:
+                    cfg["temperature"] = 0.7
 
-            message = await asyncio.to_thread(call_gemini_analyse)
-            raw = message.text or ""
+                return client.models.generate_content(
+                    model=active_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(**cfg),
+                )
+
+            try:
+                message = await asyncio.to_thread(call_gemini_analyse, model_to_use)
+                raw = message.text or ""
+            except Exception as e:
+                print(f"[analyse] error with {model_to_use}: {e}", file=sys.stderr)
+                if model_to_use != "gemini-2.5-flash":
+                    print("[analyse] falling back to gemini-2.5-flash", file=sys.stderr)
+                    model_to_use = "gemini-2.5-flash"
+                    message = await asyncio.to_thread(call_gemini_analyse, model_to_use)
+                    raw = message.text or ""
+                else:
+                    raise
             print(f"[analyse] raw preview: {raw[:200]}", file=sys.stderr)
 
             clean = raw.strip()
@@ -412,35 +446,30 @@ Return ONLY this JSON:
         try:
             model_to_use = req.model or MODEL
 
-            # ── Dynamic max_tokens & thinking configuration ───────────────
-            is_thinking_model = "3.8" in model_to_use
-            token_map = {
-                "short":  16384 if is_thinking_model else 4000,
-                "medium": 24576 if is_thinking_model else 6000,
-                "long":   32768 if is_thinking_model else 8192,
-            }
-            max_tokens = token_map.get(req.length, 16384 if is_thinking_model else 6000)
-            thinking_config = (
-                types.ThinkingConfig(thinking_budget=1024)
-                if is_thinking_model
-                else None
-            )
-
-            def call_gemini_generate():
-                print(f"[generate] calling Gemini {model_to_use}, topic={req.topic}, length={req.length}, max_tokens={max_tokens}", file=sys.stderr)
+            def call_gemini_generate(active_model: str):
+                is_gemini_3 = "3." in active_model
+                token_map = {
+                    "short":  16384 if is_gemini_3 else 4000,
+                    "medium": 24576 if is_gemini_3 else 6000,
+                    "long":   32768 if is_gemini_3 else 8192,
+                }
+                max_tokens = token_map.get(req.length, 16384 if is_gemini_3 else 6000)
+                print(f"[generate] calling Gemini {active_model}, topic={req.topic}, length={req.length}, max_tokens={max_tokens}", file=sys.stderr)
                 client = make_client()
                 cfg_kwargs = {
                     "system_instruction": system,
                     "tools": [types.Tool(google_search=types.GoogleSearch())],
-                    "temperature": 0.7,
                     "max_output_tokens": max_tokens,
+                    "safety_settings": DEFAULT_SAFETY_SETTINGS,
                 }
-                if thinking_config:
-                    cfg_kwargs["thinking_config"] = thinking_config
+                if is_gemini_3:
+                    cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW)
+                else:
+                    cfg_kwargs["temperature"] = 0.7
 
                 try:
                     res = client.models.generate_content(
-                        model=model_to_use,
+                        model=active_model,
                         contents=prompt,
                         config=types.GenerateContentConfig(
                             **cfg_kwargs,
@@ -451,24 +480,39 @@ Return ONLY this JSON:
                 except Exception as ex:
                     print(f"[generate] Search + JSON mode fallback triggered: {ex}", file=sys.stderr)
                     return client.models.generate_content(
-                        model=model_to_use,
+                        model=active_model,
                         contents=prompt,
                         config=types.GenerateContentConfig(**cfg_kwargs),
                     )
 
-            message = await asyncio.to_thread(call_gemini_generate)
+            def extract_text(resp) -> str:
+                if not resp:
+                    return ""
+                txt = resp.text or ""
+                if not txt.strip() and resp.candidates and resp.candidates[0].content:
+                    parts = resp.candidates[0].content.parts or []
+                    txt = "".join(p.text for p in parts if getattr(p, "text", None) and not getattr(p, "thought", False))
+                    if not txt.strip():
+                        txt = "".join(p.text for p in parts if getattr(p, "text", None))
+                return txt.strip()
+
+            actual_model_used = model_to_use
+            message = await asyncio.to_thread(call_gemini_generate, actual_model_used)
             print("[generate] got response back from Gemini", file=sys.stderr)
 
-            finish_reason = message.candidates[0].finish_reason if message.candidates else "NO_CANDIDATES"
-            raw = message.text or ""
-            if not raw.strip() and message.candidates and message.candidates[0].content:
-                parts = message.candidates[0].content.parts or []
-                raw = "".join(p.text for p in parts if getattr(p, "text", None) and not getattr(p, "thought", False))
-                if not raw.strip():
-                    raw = "".join(p.text for p in parts if getattr(p, "text", None))
+            raw = extract_text(message)
+
+            # Auto-fallback to gemini-2.5-flash if selected model failed or returned empty candidates
+            if not raw and actual_model_used != "gemini-2.5-flash":
+                print(f"[generate] Model {actual_model_used} returned empty content, falling back to gemini-2.5-flash", file=sys.stderr)
+                actual_model_used = "gemini-2.5-flash"
+                message = await asyncio.to_thread(call_gemini_generate, actual_model_used)
+                raw = extract_text(message)
+
+            finish_reason = message.candidates[0].finish_reason if (message and message.candidates) else "NO_CANDIDATES"
             print(f"[generate] finish_reason={finish_reason} raw length={len(raw)}", file=sys.stderr)
 
-            if not raw.strip():
+            if not raw:
                 raise ValueError(f"Empty response from model (finish_reason={finish_reason})")
 
             # ── Robust JSON extraction ────────────────────────────────────
@@ -482,7 +526,7 @@ Return ONLY this JSON:
                 return
 
             print(f"[generate] sending complete SSE", file=sys.stderr)
-            yield sse("complete", {"script": script, "model_used": model_to_use})
+            yield sse("complete", {"script": script, "model_used": actual_model_used})
             print(f"[generate] complete SSE sent", file=sys.stderr)
 
         except json.JSONDecodeError as e:
