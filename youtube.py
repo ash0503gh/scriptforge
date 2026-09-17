@@ -46,7 +46,7 @@ def sample_transcript_by_time(snippets: list, max_chars: int = 6000) -> str:
       - 35% of budget → middle 35% of video duration (argument style, transitions)
       - 25% of budget → final 25% of video duration  (closing style, CTA, sign-off)
 
-    IMPORTANT — labels are written explicitly so Claude knows these are
+    IMPORTANT — labels are written explicitly so Gemini knows these are
     VOICE ANALYSIS SAMPLES ONLY and must never be used as a script template
     or reproduced in order when generating a new script.
     """
@@ -232,19 +232,51 @@ async def get_channel_video_ids(channel_url: str, max_videos: int = 10) -> tuple
 
 
 def fetch_transcript(video_id: str, max_chars: int = 6000) -> tuple[str | None, bool]:
-    try:
-        if SCRAPER_API_KEY:
+    def _fetch_from_api(ytt_instance):
+        try:
+            return ytt_instance.fetch(video_id, languages=["en", "hi", "en-US", "en-GB", "es", "fr", "de", "pt", "id", "ja", "ko", "it"])
+        except (NoTranscriptFound, Exception):
+            # Fallback: inspect any transcript (including auto-generated in any language)
+            try:
+                transcript_list = ytt_instance.list(video_id)
+                first_t = next(iter(transcript_list), None)
+                if first_t:
+                    return first_t.fetch()
+            except Exception:
+                pass
+            raise
+
+    snippet_list = None
+    used_proxy = False
+
+    # Attempt 1: via ScraperAPI if key configured
+    if SCRAPER_API_KEY:
+        try:
             proxy_url = f"http://scraperapi:{SCRAPER_API_KEY}@proxy-server.scraperapi.com:8001"
             session = requests.Session()
             session.proxies = {"http": proxy_url, "https": proxy_url}
             session.verify = False
             ytt = YouTubeTranscriptApi(http_client=session)
-        else:
+            snippet_list = _fetch_from_api(ytt)
+            used_proxy = True
+        except (TranscriptsDisabled, NoTranscriptFound) as e:
+            print(f"[transcript] {video_id} no captions via proxy: {e}", file=sys.stderr)
+        except Exception as e:
+            print(f"[transcript] {video_id} proxy error ({e}), retrying direct...", file=sys.stderr)
+
+    # Attempt 2: direct if no proxy or proxy failed
+    if snippet_list is None:
+        try:
             ytt = YouTubeTranscriptApi()
+            snippet_list = _fetch_from_api(ytt)
+            used_proxy = False
+        except (TranscriptsDisabled, NoTranscriptFound) as e:
+            print(f"[transcript] {video_id} no captions: {e}", file=sys.stderr)
+        except Exception as e:
+            print(f"[transcript] {video_id} direct fetch error: {e}", file=sys.stderr)
 
-        snippet_list = ytt.fetch(video_id, languages=["en", "hi", "en-US", "en-GB"])
-
-        if snippet_list:
+    if snippet_list:
+        try:
             total_duration = snippet_list[-1].start + snippet_list[-1].duration
             print(
                 f"[transcript] {video_id} OK — "
@@ -252,14 +284,11 @@ def fetch_transcript(video_id: str, max_chars: int = 6000) -> tuple[str | None, 
                 f"duration={fmt_time(total_duration)}",
                 file=sys.stderr,
             )
-            # ── Sample by real timestamps, not character position ──────────────────────
             sampled = sample_transcript_by_time(snippet_list, max_chars=max_chars)
             if sampled.strip():
-                return sampled, False
-
-    except (TranscriptsDisabled, NoTranscriptFound) as e:
-        print(f"[transcript] {video_id} no captions: {e}", file=sys.stderr)
-    except Exception as e:
-        print(f"[transcript] {video_id} error: {e}", file=sys.stderr)
+                return sampled, used_proxy
+        except Exception as e:
+            print(f"[transcript] error processing snippets for {video_id}: {e}", file=sys.stderr)
 
     return None, False
+

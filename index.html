@@ -150,7 +150,7 @@
         </button>
         <button class="length-opt" data-length="long">
           <span class="length-name">Long</span>
-          <span class="length-meta">~3,000 words</span>
+          <span class="length-meta">~2,500-3,000 words</span>
           <span class="length-meta">20 min</span>
         </button>
       </div>
@@ -166,11 +166,15 @@
   <!-- ── PAGE: GENERATING (loading) ───────────────────────── -->
   <div id="page-generating" class="page">
     <div class="analyse-inner">
-      <div class="spinner-wrap">
+      <div class="spinner-wrap" id="gen-spinner-wrap">
         <div class="spinner"></div>
       </div>
       <h2 class="section-title">Writing your <em class="accent-text">script</em></h2>
       <p class="status-msg" id="gen-status">Crafting in your voice...</p>
+      <div id="gen-error" class="error-block hidden" style="margin-top: 20px;">
+        <p id="gen-error-msg" style="color: #ff6b6b; margin-bottom: 12px;"></p>
+        <button class="btn-ghost" id="gen-back-btn">← Back to topics</button>
+      </div>
     </div>
   </div>
 

@@ -267,6 +267,10 @@ function stopGeneratingMessages() {
    GENERATE PAGE
 ═══════════════════════════════════════════════════════════ */
 async function runGenerate() {
+  $('gen-error').classList.add('hidden');
+  $('gen-spinner-wrap').style.display = 'flex';
+  $('gen-status').style.display = 'block';
+
   try {
     const res = await fetch(`${API}/api/generate`, {
       method: 'POST',
@@ -291,8 +295,10 @@ async function runGenerate() {
   } catch (err) {
     stopGeneratingMessages();
     console.error('[generate] error:', err);
-    const el = $('gen-status');
-    if (el) el.textContent = `Error: ${err.message}`;
+    $('gen-spinner-wrap').style.display = 'none';
+    $('gen-status').style.display = 'none';
+    $('gen-error-msg').textContent = err.message || 'Script generation failed. Please try again.';
+    $('gen-error').classList.remove('hidden');
   }
 }
 
@@ -377,6 +383,13 @@ $('copy-all-btn').addEventListener('click', function () {
 
 $('reset-btn').addEventListener('click',      () => { resetState(); showPage('landing'); });
 $('start-over-btn').addEventListener('click', () => { resetState(); showPage('landing'); });
+const genBackBtn = $('gen-back-btn');
+if (genBackBtn) {
+  genBackBtn.addEventListener('click', () => {
+    stopGeneratingMessages();
+    showPage('topics');
+  });
+}
 
 function resetState() {
   state.channelUrl     = '';
@@ -387,6 +400,12 @@ function resetState() {
   $('channel-url').value  = '';
   $('custom-topic').value = '';
   $('url-error').classList.add('hidden');
+  const genError = $('gen-error');
+  if (genError) genError.classList.add('hidden');
+  const genSpinner = $('gen-spinner-wrap');
+  if (genSpinner) genSpinner.style.display = 'flex';
+  const genStatus = $('gen-status');
+  if (genStatus) genStatus.style.display = 'block';
   const analyseStatus = $('analyse-status');
   if (analyseStatus) analyseStatus.textContent = 'Starting analysis...';
   const progressFill = $('progress-fill');

@@ -1,6 +1,6 @@
 """
 ScriptForge — FastAPI backend
-All LLM calls use claude-sonnet-4-5.
+All LLM calls use Gemini models (default: gemini-2.5-flash).
 Frontend (HTML/CSS/JS) is served directly from this same service.
 """
 
@@ -15,7 +15,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
-import anthropic
+from google import genai
+from google.genai import types
 
 from youtube import get_channel_video_ids, fetch_transcript
 
@@ -23,9 +24,13 @@ load_dotenv()
 
 app = FastAPI(title="ScriptForge API")
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-MODEL = "claude-sonnet-4-5"
-MODEL_ANALYSE = "claude-haiku-4-5-20251001"
+GEMINI_API_KEY = (
+    os.getenv("GEMINI_API_KEY")
+    or os.getenv("GOOGLE_API_KEY")
+    or os.getenv("ANTHROPIC_API_KEY")
+    or ""
+)
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 app.add_middleware(
     CORSMiddleware,
@@ -71,8 +76,10 @@ class GenerateRequest(BaseModel):
 def sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-def make_client() -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+def make_client() -> genai.Client:
+    if not GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY is not configured in environment variables.")
+    return genai.Client(api_key=GEMINI_API_KEY)
 
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -84,7 +91,12 @@ SSE_HEADERS = {
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model": MODEL}
+    return {
+        "status": "ok",
+        "provider": "gemini",
+        "model": MODEL,
+        "has_key": bool(GEMINI_API_KEY)
+    }
 
 
 @app.post("/api/analyse")
@@ -127,7 +139,7 @@ async def analyse(req: AnalyseRequest):
         transcripts = transcripts[:8]
 
         if not transcripts:
-            yield sse("error", {"message": "No transcripts found for this channel. Captions appear to be disabled. Please try a channel that has captions enabled — most large creators do."})
+            yield sse("error", {"message": "Transcripts are not available for this channel. Captions appear to be disabled. Please try a channel that has captions enabled."})
             return
 
         yield sse("status", {"message": f"Read {len(transcripts)} transcripts. Analysing voice...", "step": 3})
@@ -223,22 +235,23 @@ Return ONLY this exact JSON (no markdown fences):
 }}"""
 
         try:
-            def call_claude_analyse():
-                print("[analyse] calling Claude...", file=sys.stderr)
-                result = make_client().messages.create(
-                    model=MODEL_ANALYSE,
-                    max_tokens=7500,
-                    system=system,
-                    messages=[{"role": "user", "content": prompt}],
+            def call_gemini_analyse():
+                print(f"[analyse] calling Gemini {MODEL}...", file=sys.stderr)
+                client = make_client()
+                result = client.models.generate_content(
+                    model=MODEL,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system,
+                        response_mime_type="application/json",
+                        temperature=0.7,
+                    ),
                 )
-                print(f"[analyse] Claude done, stop_reason={result.stop_reason}", file=sys.stderr)
+                print(f"[analyse] Gemini done", file=sys.stderr)
                 return result
 
-            message = await asyncio.to_thread(call_claude_analyse)
-
-            text_blocks = [b.text for b in message.content if b.type == "text"]
-            print(f"[analyse] text blocks count: {len(text_blocks)}", file=sys.stderr)
-            raw = text_blocks[-1] if text_blocks else ""
+            message = await asyncio.to_thread(call_gemini_analyse)
+            raw = message.text or ""
             print(f"[analyse] raw preview: {raw[:200]}", file=sys.stderr)
 
             clean = raw.strip()
@@ -276,8 +289,8 @@ async def generate_script(req: GenerateRequest):
     async def stream():
         length_map = {
             "short":  {"words": "650-750 words",   "duration": "~5 minutes",  "detail": "punchy and tight"},
-            "medium": {"words": "1400-1600 words",  "duration": "~10 minutes", "detail": "balanced depth and pace"},
-            "long":   {"words": "1800-2000 words",  "duration": "~15 minutes", "detail": "comprehensive with examples and deep dives"},
+            "medium": {"words": "1400-1600 words", "duration": "~10 minutes", "detail": "balanced depth and pace"},
+            "long":   {"words": "2500-3000 words", "duration": "~20 minutes", "detail": "comprehensive with deep dives, real-world examples, and detailed breakdown"},
         }
         target = length_map.get(req.length, length_map["medium"])
         a = req.analysis
@@ -375,37 +388,45 @@ Return ONLY this JSON:
             token_map = {
                 "short":  4000,
                 "medium": 6000,
-                "long":   8000,
+                "long":   8192,
             }
-            max_tokens = token_map.get(req.length, 5000)
+            max_tokens = token_map.get(req.length, 6000)
 
-            def call_claude_generate():
-                print(f"[generate] calling Claude, topic={req.topic}, length={req.length}, max_tokens={max_tokens}", file=sys.stderr)
-                result = make_client().messages.create(
-                    model=MODEL,
-                    max_tokens=max_tokens,
-                    system=system,
-                    messages=[{"role": "user", "content": prompt}],
-                    tools=[{"type": "web_search_20250305", "name": "web_search"}],
-                )
-                print(f"[generate] Claude done, stop_reason={result.stop_reason}", file=sys.stderr)
-                return result
+            def call_gemini_generate():
+                print(f"[generate] calling Gemini {MODEL}, topic={req.topic}, length={req.length}, max_tokens={max_tokens}", file=sys.stderr)
+                client = make_client()
+                try:
+                    res = client.models.generate_content(
+                        model=MODEL,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system,
+                            tools=[types.Tool(google_search=types.GoogleSearch())],
+                            response_mime_type="application/json",
+                            temperature=0.7,
+                            max_output_tokens=max_tokens,
+                        ),
+                    )
+                    return res
+                except Exception as ex:
+                    print(f"[generate] Search + JSON mode fallback triggered: {ex}", file=sys.stderr)
+                    return client.models.generate_content(
+                        model=MODEL,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system,
+                            tools=[types.Tool(google_search=types.GoogleSearch())],
+                            temperature=0.7,
+                            max_output_tokens=max_tokens,
+                        ),
+                    )
 
-            message = await asyncio.to_thread(call_claude_generate)
-            print("[generate] got message back", file=sys.stderr)
+            message = await asyncio.to_thread(call_gemini_generate)
+            print("[generate] got response back from Gemini", file=sys.stderr)
 
-            # ── Check if Claude was cut off before finishing ───────────────
-            if message.stop_reason == "max_tokens":
-                print(f"[generate] hit max_tokens limit", file=sys.stderr)
-                yield sse("error", {"message": "Script was too long to generate. Try a shorter length or simpler topic."})
-                return
-
-            # ── Extract last text block (after web search blocks) ─────────
-            text_blocks = [b.text for b in message.content if b.type == "text"]
-            print(f"[generate] text blocks count: {len(text_blocks)}", file=sys.stderr)
-            raw = text_blocks[-1] if text_blocks else ""
+            raw = message.text or ""
             print(f"[generate] raw length={len(raw)}", file=sys.stderr)
-            print(f"[generate] raw preview: {raw[:500]}", file=sys.stderr)
+            print(f"[generate] raw preview: {raw[:300]}", file=sys.stderr)
 
             # ── Robust JSON extraction ────────────────────────────────────
             clean = raw.strip()
