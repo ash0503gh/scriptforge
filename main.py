@@ -5,6 +5,7 @@ Frontend (HTML/CSS/JS) is served directly from this same service.
 """
 
 import json
+import re
 import os
 import sys
 import asyncio
@@ -82,6 +83,33 @@ def make_client() -> genai.Client:
     if not GEMINI_API_KEY:
         raise ValueError("GEMINI_API_KEY is not configured in environment variables.")
     return genai.Client(api_key=GEMINI_API_KEY)
+
+def robust_json_loads(raw: str) -> dict:
+    if not raw:
+        raise ValueError("Empty response from model.")
+    clean = raw.strip()
+
+    # 1. Try finding outermost { and }
+    start = clean.find("{")
+    end = clean.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = clean[start:end+1]
+        try:
+            return json.loads(candidate, strict=False)
+        except json.JSONDecodeError:
+            pass
+
+    # 2. Try stripping markdown fences
+    if "```" in clean:
+        stripped = re.sub(r"^```[a-zA-Z]*\n?", "", clean)
+        stripped = re.sub(r"\n?```$", "", stripped).strip()
+        try:
+            return json.loads(stripped, strict=False)
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Direct load with non-strict control chars
+    return json.loads(clean, strict=False)
 
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -259,13 +287,7 @@ Return ONLY this exact JSON (no markdown fences):
             print(f"[analyse] raw preview: {raw[:200]}", file=sys.stderr)
 
             clean = raw.strip()
-            if "```json" in clean:
-                clean = clean.split("```json")[1].split("```")[0]
-            elif "```" in clean:
-                clean = clean.split("```")[1].split("```")[0]
-            clean = clean.strip()
-
-            analysis = json.loads(clean)
+            analysis = robust_json_loads(clean)
 
             # ── Attach channel metadata to analysis for frontend use ──────
             analysis["channel_metadata"] = {
@@ -436,20 +458,8 @@ Return ONLY this JSON:
 
             # ── Robust JSON extraction ────────────────────────────────────
             clean = raw.strip()
-            if "```json" in clean:
-                clean = clean.split("```json")[1].split("```")[0]
-            elif "```" in clean:
-                clean = clean.split("```")[1].split("```")[0]
-            else:
-                # Find JSON object anywhere in response
-                start = clean.find("{")
-                end = clean.rfind("}") + 1
-                if start != -1 and end > start:
-                    clean = clean[start:end]
-            clean = clean.strip()
-
-            print(f"[generate] attempting json.loads", file=sys.stderr)
-            script = json.loads(clean)
+            print(f"[generate] attempting robust_json_loads, length={len(clean)}", file=sys.stderr)
+            script = robust_json_loads(clean)
             print(f"[generate] json parsed OK, sections={len(script.get('sections', []))}", file=sys.stderr)
 
             if not script.get("sections"):
