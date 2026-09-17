@@ -459,14 +459,17 @@ Return ONLY this JSON:
             message = await asyncio.to_thread(call_gemini_generate)
             print("[generate] got response back from Gemini", file=sys.stderr)
 
+            finish_reason = message.candidates[0].finish_reason if message.candidates else "NO_CANDIDATES"
             raw = message.text or ""
             if not raw.strip() and message.candidates and message.candidates[0].content:
                 parts = message.candidates[0].content.parts or []
                 raw = "".join(p.text for p in parts if getattr(p, "text", None) and not getattr(p, "thought", False))
                 if not raw.strip():
                     raw = "".join(p.text for p in parts if getattr(p, "text", None))
-            print(f"[generate] raw length={len(raw)}", file=sys.stderr)
-            print(f"[generate] raw preview: {raw[:300]}", file=sys.stderr)
+            print(f"[generate] finish_reason={finish_reason} raw length={len(raw)}", file=sys.stderr)
+
+            if not raw.strip():
+                raise ValueError(f"Empty response from model (finish_reason={finish_reason})")
 
             # ── Robust JSON extraction ────────────────────────────────────
             clean = raw.strip()
