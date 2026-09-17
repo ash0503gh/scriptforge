@@ -412,27 +412,39 @@ Return ONLY this JSON:
         try:
             model_to_use = req.model or MODEL
 
-            # ── Dynamic max_tokens based on script length ─────────────────
+            # ── Dynamic max_tokens & thinking configuration ───────────────
+            is_thinking_model = "3.8" in model_to_use
             token_map = {
-                "short":  4000,
-                "medium": 6000,
-                "long":   16000 if "3.8" in model_to_use else 8192,
+                "short":  16384 if is_thinking_model else 4000,
+                "medium": 24576 if is_thinking_model else 6000,
+                "long":   32768 if is_thinking_model else 8192,
             }
-            max_tokens = token_map.get(req.length, 6000)
+            max_tokens = token_map.get(req.length, 16384 if is_thinking_model else 6000)
+            thinking_config = (
+                types.ThinkingConfig(thinking_budget=1024)
+                if is_thinking_model
+                else None
+            )
 
             def call_gemini_generate():
                 print(f"[generate] calling Gemini {model_to_use}, topic={req.topic}, length={req.length}, max_tokens={max_tokens}", file=sys.stderr)
                 client = make_client()
+                cfg_kwargs = {
+                    "system_instruction": system,
+                    "tools": [types.Tool(google_search=types.GoogleSearch())],
+                    "temperature": 0.7,
+                    "max_output_tokens": max_tokens,
+                }
+                if thinking_config:
+                    cfg_kwargs["thinking_config"] = thinking_config
+
                 try:
                     res = client.models.generate_content(
                         model=model_to_use,
                         contents=prompt,
                         config=types.GenerateContentConfig(
-                            system_instruction=system,
-                            tools=[types.Tool(google_search=types.GoogleSearch())],
+                            **cfg_kwargs,
                             response_mime_type="application/json",
-                            temperature=0.7,
-                            max_output_tokens=max_tokens,
                         ),
                     )
                     return res
@@ -441,18 +453,18 @@ Return ONLY this JSON:
                     return client.models.generate_content(
                         model=model_to_use,
                         contents=prompt,
-                        config=types.GenerateContentConfig(
-                            system_instruction=system,
-                            tools=[types.Tool(google_search=types.GoogleSearch())],
-                            temperature=0.7,
-                            max_output_tokens=max_tokens,
-                        ),
+                        config=types.GenerateContentConfig(**cfg_kwargs),
                     )
 
             message = await asyncio.to_thread(call_gemini_generate)
             print("[generate] got response back from Gemini", file=sys.stderr)
 
             raw = message.text or ""
+            if not raw.strip() and message.candidates and message.candidates[0].content:
+                parts = message.candidates[0].content.parts or []
+                raw = "".join(p.text for p in parts if getattr(p, "text", None) and not getattr(p, "thought", False))
+                if not raw.strip():
+                    raw = "".join(p.text for p in parts if getattr(p, "text", None))
             print(f"[generate] raw length={len(raw)}", file=sys.stderr)
             print(f"[generate] raw preview: {raw[:300]}", file=sys.stderr)
 
