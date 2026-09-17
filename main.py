@@ -64,11 +64,13 @@ if (FRONTEND_DIR / "index.html").exists():
 
 class AnalyseRequest(BaseModel):
     channelUrl: str
+    model: str | None = None
 
 class GenerateRequest(BaseModel):
     topic: str
     length: str
     analysis: dict
+    model: str | None = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -235,11 +237,13 @@ Return ONLY this exact JSON (no markdown fences):
 }}"""
 
         try:
+            model_to_use = req.model or MODEL
+
             def call_gemini_analyse():
-                print(f"[analyse] calling Gemini {MODEL}...", file=sys.stderr)
+                print(f"[analyse] calling Gemini {model_to_use}...", file=sys.stderr)
                 client = make_client()
                 result = client.models.generate_content(
-                    model=MODEL,
+                    model=model_to_use,
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         system_instruction=system,
@@ -384,20 +388,22 @@ Return ONLY this JSON:
 }}"""
 
         try:
+            model_to_use = req.model or MODEL
+
             # ── Dynamic max_tokens based on script length ─────────────────
             token_map = {
                 "short":  4000,
                 "medium": 6000,
-                "long":   8192,
+                "long":   16000 if "3.8" in model_to_use else 8192,
             }
             max_tokens = token_map.get(req.length, 6000)
 
             def call_gemini_generate():
-                print(f"[generate] calling Gemini {MODEL}, topic={req.topic}, length={req.length}, max_tokens={max_tokens}", file=sys.stderr)
+                print(f"[generate] calling Gemini {model_to_use}, topic={req.topic}, length={req.length}, max_tokens={max_tokens}", file=sys.stderr)
                 client = make_client()
                 try:
                     res = client.models.generate_content(
-                        model=MODEL,
+                        model=model_to_use,
                         contents=prompt,
                         config=types.GenerateContentConfig(
                             system_instruction=system,
@@ -411,7 +417,7 @@ Return ONLY this JSON:
                 except Exception as ex:
                     print(f"[generate] Search + JSON mode fallback triggered: {ex}", file=sys.stderr)
                     return client.models.generate_content(
-                        model=MODEL,
+                        model=model_to_use,
                         contents=prompt,
                         config=types.GenerateContentConfig(
                             system_instruction=system,
@@ -451,7 +457,7 @@ Return ONLY this JSON:
                 return
 
             print(f"[generate] sending complete SSE", file=sys.stderr)
-            yield sse("complete", {"script": script})
+            yield sse("complete", {"script": script, "model_used": model_to_use})
             print(f"[generate] complete SSE sent", file=sys.stderr)
 
         except json.JSONDecodeError as e:
